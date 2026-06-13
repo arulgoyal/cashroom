@@ -1,0 +1,78 @@
+# docker-compose.yml
+# ──────────────────────────────────────────────────────────────────────────
+# Local development INFRASTRUCTURE for Cashroom.
+#
+# This file describes only the backing services every app talks to:
+#   - PostgreSQL  (durable, relational system-of-record)
+#   - Redis       (in-memory store for BullMQ queues + caching)
+#
+# Application containers (backend, bff, frontend, workers) come in later steps.
+#
+# NOTE: there is deliberately no top-level `version:` key. The old Compose
+# file-format version (e.g. "3.8") is OBSOLETE under the modern Compose Spec
+# that Docker Compose v2 uses. Keeping it now only prints a deprecation warning.
+# ──────────────────────────────────────────────────────────────────────────
+
+services:
+  # ========================================================================
+  # PostgreSQL — Cashroom's system of record.
+  # Anything that must survive forever and be queried relationally lives here:
+  # users, loan applications, disbursements, repayments, ledger entries.
+  # ========================================================================
+  postgres:
+    image: postgres:17-alpine          # pinned major version; alpine = small base image
+    container_name: cashroom-postgres  # stable, human-readable name (vs random hash)
+    restart: unless-stopped            # auto-restart on crash/reboot, but not if YOU stop it
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"  # HOST:CONTAINER — expose db to tools on your machine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}          # superuser created on first boot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}  # that user's password
+      POSTGRES_DB: ${POSTGRES_DB}              # database created on first boot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # persist data outside the container
+    healthcheck:
+      # pg_isready returns 0 only when Postgres can actually accept connections.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s      # run the check every 10s
+      timeout: 5s        # fail the check if it takes >5s
+      retries: 5         # mark unhealthy after 5 consecutive failures
+      start_period: 10s  # grace window on first boot before failures count
+
+  # ========================================================================
+  # Redis — in-memory data store.
+  # In Cashroom it backs BullMQ (job queues, retries, DLQ) and short-lived
+  # caching/session data. Fast, but treated as ephemeral compared to Postgres.
+  # ========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: cashroom-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    # Override the default startup command to:
+    #   --appendonly yes  -> turn on AOF persistence (write each op to disk)
+    #   --requirepass ...  -> require a password even on localhost
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data   # AOF/RDB files live here so data survives restarts
+    healthcheck:
+      # Authenticated PING; -a passes the password. grep ensures we saw PONG.
+      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}  # makes the var available inside the container for healthcheck
+
+# ==========================================================================
+# Named volumes.
+# Docker manages these on the host; they outlive container create/destroy.
+# This is what keeps your database from being wiped every `docker compose down`.
+# ==========================================================================
+volumes:
+  postgres_data:
+    name: cashroom_postgres_data
+  redis_data:
+    name: cashroom_redis_data

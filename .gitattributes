@@ -1,0 +1,12 @@
+# Normalize line endings across machines.
+# Store text files with LF in the repo and check them out as LF everywhere,
+# so a Windows/macOS/Linux mix doesn't produce phantom CRLF-only diffs.
+* text=auto eol=lf
+
+# Treat these as binary (never line-ending-normalized).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

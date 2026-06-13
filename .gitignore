@@ -1,0 +1,46 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Cashroom — root .gitignore
+# ──────────────────────────────────────────────────────────────────────────
+
+# ---- Secrets / environment ----
+# The real secrets file. Committed counterpart is .env.example (kept in git).
+.env
+.env.local
+.env.*.local
+*.env
+
+# ---- Node / NestJS ----
+node_modules/
+dist/            # NestJS/TS compiled output
+build/
+coverage/        # Jest coverage reports
+.nyc_output/
+*.tsbuildinfo    # TypeScript incremental build cache
+
+# ---- Logs ----
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Package manager noise ----
+.pnp.*
+.yarn/cache
+.yarn/install-state.gz
+
+# ---- Editor / OS cruft ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json   # keep shared recommended-extensions, ignore the rest
+
+# ---- Docker ----
+# Compose does not create files here, but local override files are common
+# and often machine-specific:
+docker-compose.override.yml
+
+# ---- Local-only learning notes (intentionally not committed) ----
+learning
