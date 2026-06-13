@@ -43,4 +43,8 @@ Thumbs.db
 docker-compose.override.yml
 
 # ---- Local-only learning notes (intentionally not committed) ----
-learning
+learning.claude/settings.local.json
+.claude/agent-memory/
+.code-review-graph/
+graphify-out/
+.claude/settings.local.json
