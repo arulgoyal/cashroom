@@ -1,24 +1,56 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { JwtService, JwtSignOptions, TokenExpiredError } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
+import { createHash, randomUUID } from 'crypto';
 import { UserService } from '../user/user.service';
 import { User } from '../user/entities/user.entity';
 import { SignupDto } from './dto/signup.dto';
+import { SigninDto } from './dto/signin.dto';
+import { RefreshDto } from './dto/refresh.dto';
 import { EmailAlreadyExistsException } from './exceptions/email-already-exists.exception';
+import {
+  JwtPayload,
+  RefreshTokenPayload,
+} from './interfaces/jwt-payload.interface';
 
-/** The user, minus the password hash — what we are ever willing to return. */
-export type SafeUser = Omit<User, 'passwordHash'>;
+/** The user, minus the secret hash columns — what we are ever willing to return. */
+export type SafeUser = Omit<User, 'passwordHash' | 'refreshTokenHash'>;
+
+/** Token pair returned by signin / refresh. */
+export interface TokenPair {
+  accessToken: string;
+  refreshToken: string;
+}
+
+/**
+ * A fixed, valid bcrypt hash compared against when the email is unknown. bcrypt
+ * still does the (slow) work, so an attacker can't distinguish "no such user"
+ * from "wrong password" by timing → no user enumeration. The plaintext never
+ * matches it, so the compare always returns false.
+ */
+const DUMMY_HASH =
+  '$2b$12$vq8iqDdT29xrbaCU.sHRdecRs7WfLdAa37lQr66Na4PNq2oHDUtla';
+
+/** Same generic message whether the email is unknown or the password is wrong. */
+const INVALID_CREDENTIALS = 'Invalid email or password';
 
 @Injectable()
 export class AuthService {
   private readonly bcryptRounds: number;
+  private readonly refreshSecret: string;
+  private readonly refreshExpiresIn: JwtSignOptions['expiresIn'];
 
   constructor(
     private readonly users: UserService,
-    config: ConfigService,
+    private readonly jwt: JwtService,
+    private readonly config: ConfigService,
   ) {
-    // Cost factor flows through config so it can be tuned per environment.
     this.bcryptRounds = Number(config.get<string>('BCRYPT_ROUNDS') ?? 12);
+    this.refreshSecret =
+      config.get<string>('JWT_REFRESH_SECRET') ?? 'change_me_refresh';
+    this.refreshExpiresIn = (config.get<string>('JWT_REFRESH_EXPIRES_IN') ??
+      '7d') as JwtSignOptions['expiresIn'];
   }
 
   /**
@@ -47,10 +79,108 @@ export class AuthService {
     return this.toSafeUser(user);
   }
 
-  /** Strip the hash so it can never leave the service in a response. */
+  /**
+   * Verify credentials and issue a token pair. Uses the same generic error and a
+   * dummy hash compare for the unknown-email case, so neither the message nor the
+   * response time reveals whether an email is registered.
+   */
+  async signin(dto: SigninDto): Promise<TokenPair> {
+    const user = await this.users.findByEmailWithPassword(dto.email);
+
+    if (!user) {
+      await bcrypt.compare(dto.password, DUMMY_HASH); // equalize timing
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
+    }
+
+    const valid = await bcrypt.compare(dto.password, user.passwordHash);
+    if (!valid) {
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
+    }
+
+    return this.issueTokens(user);
+  }
+
+  /**
+   * Exchange a valid refresh token for a NEW token pair (rotation). The DB hash is
+   * the source of truth for revocation: even a correctly-signed, unexpired refresh
+   * token is rejected if its hash no longer matches the stored one (i.e. it was
+   * already rotated, or the user signed in elsewhere).
+   */
+  async refresh(dto: RefreshDto): Promise<TokenPair> {
+    let payload: RefreshTokenPayload;
+    try {
+      payload = await this.jwt.verifyAsync<RefreshTokenPayload>(
+        dto.refreshToken,
+        { secret: this.refreshSecret },
+      );
+    } catch (err) {
+      const message =
+        err instanceof TokenExpiredError
+          ? 'Refresh token expired'
+          : 'Invalid refresh token';
+      throw new UnauthorizedException(message);
+    }
+
+    const user = await this.users.findByIdWithRefreshHash(payload.sub);
+    if (!user?.refreshTokenHash) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    const presentedHash = this.hashToken(dto.refreshToken);
+    if (presentedHash !== user.refreshTokenHash) {
+      // Correctly signed but not the current token → rotated/revoked/stolen.
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    return this.issueTokens(user);
+  }
+
+  /** Sign a fresh access+refresh pair and persist the new refresh token's hash. */
+  private async issueTokens(user: User): Promise<TokenPair> {
+    const accessPayload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    };
+
+    // Access token uses the module-default secret/expiry (JWT_SECRET / 15m).
+    const accessToken = await this.jwt.signAsync(accessPayload);
+
+    // Refresh token: separate secret + longer expiry. The jti makes every issued
+    // token unique, so rotation always produces a genuinely new token + hash.
+    const refreshPayload: RefreshTokenPayload = {
+      sub: user.id,
+      jti: randomUUID(),
+    };
+    const refreshToken = await this.jwt.signAsync(refreshPayload, {
+      secret: this.refreshSecret,
+      expiresIn: this.refreshExpiresIn,
+    });
+
+    // Store only the HASH — a DB leak can't be replayed. Overwriting it here is
+    // both the "remember this session" step and the rotation/single-session rule.
+    await this.users.updateRefreshTokenHash(
+      user.id,
+      this.hashToken(refreshToken),
+    );
+
+    return { accessToken, refreshToken };
+  }
+
+  /**
+   * sha256 of a token. Fast hash is fine here (unlike passwords) because a JWT is
+   * high-entropy — there's nothing to brute-force. Still hashed so the raw token
+   * is never stored.
+   */
+  private hashToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  /** Strip secret hashes so they can never leave the service in a response. */
   private toSafeUser(user: User): SafeUser {
-    const { passwordHash: _omit, ...safe } = user;
-    void _omit;
+    const { passwordHash: _pw, refreshTokenHash: _rt, ...safe } = user;
+    void _pw;
+    void _rt;
     return safe;
   }
 }
