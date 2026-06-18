@@ -1,6 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import { JwtModule, JwtService } from '@nestjs/jwt';
+import { UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
+import { createHash } from 'crypto';
 import { AuthService } from './auth.service';
 import { CreateUserData, UserService } from '../user/user.service';
 import { User } from '../user/entities/user.entity';
@@ -9,95 +12,228 @@ import { SignupDto } from './dto/signup.dto';
 import { EmailAlreadyExistsException } from './exceptions/email-already-exists.exception';
 
 /**
- * Unit tests for AuthService.signup.
+ * Unit tests for AuthService.
  *
- * MOCKING: we replace the real UserService (and thus the DB) with a fake whose
- * methods are jest.fn(). A unit test must isolate the unit — no Postgres (slow,
- * stateful, would make this an integration test). We script the fake's return
- * values and then assert AuthService did the right thing. bcrypt is real (pure
- * CPU, deterministic enough to verify the hash), kept at low rounds for speed.
+ * MOCKING: the real UserService (and thus the DB) is replaced with jest.fn()s so
+ * the unit is isolated — no Postgres (slow, stateful). JwtService is REAL
+ * (registered with a test secret) so signing/verifying/rotation are genuinely
+ * exercised. bcrypt is real but at low rounds for speed.
  */
-describe('AuthService.signup', () => {
-  let service: AuthService;
-  let users: {
-    findByEmail: jest.Mock<Promise<User | null>, [string]>;
-    create: jest.Mock<Promise<User>, [CreateUserData]>;
-  };
+const TEST_ENV: Record<string, string> = {
+  BCRYPT_ROUNDS: '4',
+  JWT_SECRET: 'test-access-secret',
+  JWT_EXPIRES_IN: '15m',
+  JWT_REFRESH_SECRET: 'test-refresh-secret',
+  JWT_REFRESH_EXPIRES_IN: '7d',
+};
 
-  const dto: SignupDto = {
-    email: 'Student@Example.com',
-    password: 'sup3rsecret',
-    confirmPassword: 'sup3rsecret',
-  };
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+
+interface UsersMock {
+  findByEmail: jest.Mock<Promise<User | null>, [string]>;
+  create: jest.Mock<Promise<User>, [CreateUserData]>;
+  findByEmailWithPassword: jest.Mock<Promise<User | null>, [string]>;
+  findById: jest.Mock<Promise<User | null>, [string]>;
+  findByIdWithRefreshHash: jest.Mock<Promise<User | null>, [string]>;
+  updateRefreshTokenHash: jest.Mock<Promise<void>, [string, string | null]>;
+}
+
+describe('AuthService', () => {
+  let service: AuthService;
+  let jwt: JwtService;
+  let users: UsersMock;
+
+  const makeUser = (overrides: Partial<User> = {}): User =>
+    Object.assign(new User(), {
+      id: '1',
+      email: 'student@example.com',
+      role: UserRole.STUDENT,
+      isEmailVerified: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...overrides,
+    });
 
   beforeEach(async () => {
     users = {
       findByEmail: jest.fn<Promise<User | null>, [string]>(),
       create: jest.fn<Promise<User>, [CreateUserData]>(),
+      findByEmailWithPassword: jest.fn<Promise<User | null>, [string]>(),
+      findById: jest.fn<Promise<User | null>, [string]>(),
+      findByIdWithRefreshHash: jest.fn<Promise<User | null>, [string]>(),
+      updateRefreshTokenHash: jest
+        .fn<Promise<void>, [string, string | null]>()
+        .mockResolvedValue(undefined),
     };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
+      imports: [
+        JwtModule.register({
+          secret: TEST_ENV.JWT_SECRET,
+          signOptions: { expiresIn: '15m' },
+        }),
+      ],
       providers: [
         AuthService,
         { provide: UserService, useValue: users },
-        // Low cost factor → fast tests. Production uses 12 via .env.
-        { provide: ConfigService, useValue: { get: () => '4' } },
+        {
+          provide: ConfigService,
+          useValue: { get: (k: string) => TEST_ENV[k] },
+        },
       ],
     }).compile();
 
     service = moduleRef.get(AuthService);
+    jwt = moduleRef.get(JwtService);
   });
 
-  it('happy path: hashes the password, creates the user, returns no hash', async () => {
-    users.findByEmail.mockResolvedValue(null);
-    users.create.mockImplementation((data: CreateUserData) =>
-      Promise.resolve(
-        Object.assign(new User(), {
-          id: '1',
-          email: data.email,
-          passwordHash: data.passwordHash,
-          role: data.role ?? UserRole.STUDENT,
-          isEmailVerified: false,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        }),
-      ),
-    );
+  describe('signup', () => {
+    const dto: SignupDto = {
+      email: 'Student@Example.com',
+      password: 'sup3rsecret',
+      confirmPassword: 'sup3rsecret',
+    };
 
-    const result = await service.signup(dto);
+    it('happy path: hashes the password, creates the user, returns no hash', async () => {
+      users.findByEmail.mockResolvedValue(null);
+      users.create.mockImplementation((data: CreateUserData) =>
+        Promise.resolve(
+          makeUser({ email: data.email, passwordHash: data.passwordHash }),
+        ),
+      );
 
-    // looked up the duplicate by normalised (lowercased) email
-    expect(users.findByEmail).toHaveBeenCalledWith('student@example.com');
+      const result = await service.signup(dto);
 
-    // created exactly once, with a bcrypt hash — NOT the plaintext
-    expect(users.create).toHaveBeenCalledTimes(1);
-    const created = users.create.mock.calls[0][0];
-    expect(created.email).toBe('student@example.com');
-    expect(created.passwordHash).not.toBe(dto.password);
-    await expect(
-      bcrypt.compare(dto.password, created.passwordHash),
-    ).resolves.toBe(true);
+      expect(users.findByEmail).toHaveBeenCalledWith('student@example.com');
+      expect(users.create).toHaveBeenCalledTimes(1);
+      const created = users.create.mock.calls[0][0];
+      expect(created.passwordHash).not.toBe(dto.password);
+      await expect(
+        bcrypt.compare(dto.password, created.passwordHash),
+      ).resolves.toBe(true);
+      expect(result).not.toHaveProperty('passwordHash');
+    });
 
-    // returned object never carries the hash
-    expect(result).not.toHaveProperty('passwordHash');
-    expect(result.email).toBe('student@example.com');
-    expect(result.role).toBe(UserRole.STUDENT);
+    it('duplicate email: throws 409 and never hashes or creates', async () => {
+      users.findByEmail.mockResolvedValue(makeUser({ id: '7' }));
+      const hashSpy = jest.spyOn(bcrypt, 'hash');
+
+      await expect(service.signup(dto)).rejects.toBeInstanceOf(
+        EmailAlreadyExistsException,
+      );
+      expect(hashSpy).not.toHaveBeenCalled();
+      expect(users.create).not.toHaveBeenCalled();
+      hashSpy.mockRestore();
+    });
   });
 
-  it('duplicate email: throws 409 and never hashes or creates', async () => {
-    users.findByEmail.mockResolvedValue(
-      Object.assign(new User(), { id: '7', email: 'student@example.com' }),
-    );
-    const hashSpy = jest.spyOn(bcrypt, 'hash');
+  describe('signin', () => {
+    const dto = { email: 'Student@Example.com', password: 'sup3rsecret' };
 
-    await expect(service.signup(dto)).rejects.toBeInstanceOf(
-      EmailAlreadyExistsException,
-    );
+    it('happy path: returns a token pair, stores the refresh hash, encodes claims', async () => {
+      const passwordHash = await bcrypt.hash(dto.password, 4);
+      users.findByEmailWithPassword.mockResolvedValue(
+        makeUser({ passwordHash }),
+      );
 
-    // ordering guarantee: the expensive work never ran
-    expect(hashSpy).not.toHaveBeenCalled();
-    expect(users.create).not.toHaveBeenCalled();
+      const { accessToken, refreshToken } = await service.signin(dto);
 
-    hashSpy.mockRestore();
+      // access token carries { sub, email, role }
+      const claims = jwt.verify<{ sub: string; email: string; role: string }>(
+        accessToken,
+        { secret: TEST_ENV.JWT_SECRET },
+      );
+      expect(claims.sub).toBe('1');
+      expect(claims.email).toBe('student@example.com');
+      expect(claims.role).toBe(UserRole.STUDENT);
+
+      // the HASH of the refresh token was stored — never the raw token
+      expect(users.updateRefreshTokenHash).toHaveBeenCalledWith(
+        '1',
+        sha256(refreshToken),
+      );
+    });
+
+    it('wrong password: 401, no tokens, no refresh hash written', async () => {
+      const passwordHash = await bcrypt.hash('a-different-password', 4);
+      users.findByEmailWithPassword.mockResolvedValue(
+        makeUser({ passwordHash }),
+      );
+
+      await expect(service.signin(dto)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(users.updateRefreshTokenHash).not.toHaveBeenCalled();
+    });
+
+    it('unknown email: 401, and still runs a compare (timing/enumeration defence)', async () => {
+      users.findByEmailWithPassword.mockResolvedValue(null);
+      const compareSpy = jest.spyOn(bcrypt, 'compare');
+
+      await expect(service.signin(dto)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(compareSpy).toHaveBeenCalledTimes(1); // dummy compare ran
+      compareSpy.mockRestore();
+    });
+  });
+
+  describe('refresh', () => {
+    const signRefresh = (sub: string) =>
+      jwt.sign(
+        { sub, jti: 'fixed-jti' },
+        { secret: TEST_ENV.JWT_REFRESH_SECRET, expiresIn: '7d' },
+      );
+
+    it('valid + hash matches: returns a new pair and rotates the stored hash', async () => {
+      const refreshToken = signRefresh('1');
+      users.findByIdWithRefreshHash.mockResolvedValue(
+        makeUser({ refreshTokenHash: sha256(refreshToken) }),
+      );
+
+      const result = await service.refresh({ refreshToken });
+
+      expect(result.accessToken).toBeDefined();
+      expect(result.refreshToken).toBeDefined();
+      // rotation: a NEW hash (different jti) is stored
+      const storedHash = users.updateRefreshTokenHash.mock.calls[0][1];
+      expect(storedHash).toBe(sha256(result.refreshToken));
+      expect(storedHash).not.toBe(sha256(refreshToken));
+    });
+
+    it('hash mismatch (reused/revoked token): 401, no rotation', async () => {
+      const refreshToken = signRefresh('1');
+      users.findByIdWithRefreshHash.mockResolvedValue(
+        makeUser({ refreshTokenHash: sha256('some-other-token') }),
+      );
+
+      await expect(service.refresh({ refreshToken })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(users.updateRefreshTokenHash).not.toHaveBeenCalled();
+    });
+
+    it('invalid signature: 401', async () => {
+      const forged = jwt.sign(
+        { sub: '1', jti: 'x' },
+        { secret: 'wrong-secret', expiresIn: '7d' },
+      );
+
+      await expect(
+        service.refresh({ refreshToken: forged }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(users.findByIdWithRefreshHash).not.toHaveBeenCalled();
+    });
+
+    it('expired token: 401', async () => {
+      const expired = jwt.sign(
+        { sub: '1', jti: 'x' },
+        { secret: TEST_ENV.JWT_REFRESH_SECRET, expiresIn: '-1s' },
+      );
+
+      await expect(
+        service.refresh({ refreshToken: expired }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+    });
   });
 });
