@@ -23,7 +23,7 @@ export class UserController {
   async me(@CurrentUser() payload: JwtPayloadWithTimestamps): Promise<User> {
     const user = await this.users.findById(payload.sub);
     if (!user) {
-      // Token was valid but the user is gone (deleted since issue). 
+      // Token was valid but the user is gone (deleted since issue).
       throw new NotFoundException('User not found');
     }
     return user;
