@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
+import { JwtAuthModule } from './auth/jwt-auth.module';
 import { AuthModule } from './auth/auth.module';
 import { UserModule } from './user/user.module';
 import { LoanModule } from './loan/loan.module';
@@ -21,6 +22,10 @@ import { LoanModule } from './loan/loan.module';
 
     // Infrastructure: establishes the one Postgres connection.
     DatabaseModule,
+
+    // @Global: makes JwtService (signing) + JwtAuthGuard available everywhere,
+    // avoiding an Auth↔User import cycle.
+    JwtAuthModule,
 
     // Feature modules.
     HealthModule,

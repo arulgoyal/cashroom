@@ -1,0 +1,23 @@
+# ---- Secrets ----
+.env
+.env.local
+.env.*.local
+
+# ---- Node / NestJS ----
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# ---- Logs ----
+logs/
+*.log
+npm-debug.log*
+
+# ---- Editor / OS ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
