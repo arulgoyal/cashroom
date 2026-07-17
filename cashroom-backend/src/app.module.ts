@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { BullModule } from '@nestjs/bullmq';
+import { bullConnectionFactory } from './queue/bull-connection';
+import { EMAIL_DLQ } from './queue/queue.constants';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { JwtAuthModule } from './auth/jwt-auth.module';
@@ -22,6 +25,17 @@ import { LoanModule } from './loan/loan.module';
 
     // Infrastructure: establishes the one Postgres connection.
     DatabaseModule,
+
+    // Root BullMQ connection to Redis (shared by all registered queues). Feature
+    // modules add specific queues with BullModule.registerQueue(...).
+    BullModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: bullConnectionFactory,
+    }),
+
+    // Register the DLQ here so the API has a handle for the Bull Board dashboard
+    // (the `email` queue is registered in AuthModule for the producer).
+    BullModule.registerQueue({ name: EMAIL_DLQ }),
 
     // @Global: makes JwtService (signing) + JwtAuthGuard available everywhere,
     // avoiding an Auth↔User import cycle.

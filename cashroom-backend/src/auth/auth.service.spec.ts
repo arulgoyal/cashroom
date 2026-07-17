@@ -4,12 +4,14 @@ import { JwtModule, JwtService } from '@nestjs/jwt';
 import { UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { createHash } from 'crypto';
+import { getQueueToken } from '@nestjs/bullmq';
 import { AuthService } from './auth.service';
 import { CreateUserData, UserService } from '../user/user.service';
 import { User } from '../user/entities/user.entity';
 import { UserRole } from '../user/enums/user-role.enum';
 import { SignupDto } from './dto/signup.dto';
 import { EmailAlreadyExistsException } from './exceptions/email-already-exists.exception';
+import { EMAIL_QUEUE, SEND_VERIFICATION_EMAIL } from '../queue/queue.constants';
 
 /**
  * Unit tests for AuthService.
@@ -25,6 +27,8 @@ const TEST_ENV: Record<string, string> = {
   JWT_EXPIRES_IN: '15m',
   JWT_REFRESH_SECRET: 'test-refresh-secret',
   JWT_REFRESH_EXPIRES_IN: '7d',
+  EMAIL_VERIFICATION_SECRET: 'test-verify-secret',
+  EMAIL_VERIFICATION_EXPIRES_IN: '24h',
 };
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -42,6 +46,12 @@ describe('AuthService', () => {
   let service: AuthService;
   let jwt: JwtService;
   let users: UsersMock;
+  let emailQueue: {
+    add: jest.Mock<
+      Promise<{ id: string }>,
+      [string, Record<string, unknown>, Record<string, unknown>]
+    >;
+  };
 
   const makeUser = (overrides: Partial<User> = {}): User =>
     Object.assign(new User(), {
@@ -66,6 +76,15 @@ describe('AuthService', () => {
         .mockResolvedValue(undefined),
     };
 
+    emailQueue = {
+      add: jest
+        .fn<
+          Promise<{ id: string }>,
+          [string, Record<string, unknown>, Record<string, unknown>]
+        >()
+        .mockResolvedValue({ id: 'job1' }),
+    };
+
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [
         JwtModule.register({
@@ -80,6 +99,7 @@ describe('AuthService', () => {
           provide: ConfigService,
           useValue: { get: (k: string) => TEST_ENV[k] },
         },
+        { provide: getQueueToken(EMAIL_QUEUE), useValue: emailQueue },
       ],
     }).compile();
 
@@ -112,6 +132,32 @@ describe('AuthService', () => {
         bcrypt.compare(dto.password, created.passwordHash),
       ).resolves.toBe(true);
       expect(result).not.toHaveProperty('passwordHash');
+
+      // enqueues exactly one verification-email job with an IDs+email payload
+      expect(emailQueue.add).toHaveBeenCalledTimes(1);
+      const [jobName, payload, opts] = emailQueue.add.mock.calls[0];
+      expect(jobName).toBe(SEND_VERIFICATION_EMAIL);
+      expect(payload).toMatchObject({
+        userId: '1',
+        email: 'student@example.com',
+      });
+      expect(typeof payload.verificationToken).toBe('string');
+      expect(opts).toMatchObject({ attempts: 3 });
+    });
+
+    it('enqueue failure does NOT fail signup (account already created)', async () => {
+      users.findByEmail.mockResolvedValue(null);
+      users.create.mockImplementation((data: CreateUserData) =>
+        Promise.resolve(
+          makeUser({ email: data.email, passwordHash: data.passwordHash }),
+        ),
+      );
+      emailQueue.add.mockRejectedValue(new Error('redis down'));
+
+      await expect(service.signup(dto)).resolves.toHaveProperty(
+        'email',
+        'student@example.com',
+      );
     });
 
     it('duplicate email: throws 409 and never hashes or creates', async () => {

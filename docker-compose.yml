@@ -86,6 +86,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy   # wait until the DB actually accepts connections
+      redis:
+        condition: service_healthy   # needed to enqueue the verification-email job
     ports:
       - "${BACKEND_PORT:-3000}:3000"
     environment:
@@ -101,6 +103,12 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
       JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN}
       BCRYPT_ROUNDS: ${BCRYPT_ROUNDS}
+      # Redis for BullMQ (reach it by service name), + verification-token signing.
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      EMAIL_VERIFICATION_SECRET: ${EMAIL_VERIFICATION_SECRET}
+      EMAIL_VERIFICATION_EXPIRES_IN: ${EMAIL_VERIFICATION_EXPIRES_IN}
     healthcheck:
       # busybox wget (bundled in alpine); /health returns 200 when the app is up.
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
@@ -140,6 +148,32 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  # ========================================================================
+  # cashroom-worker — background job processor (BullMQ consumer).
+  # SAME image as the backend, but a different entrypoint (command override):
+  # it runs dist/worker/main.worker.js instead of the API. Runs as its OWN
+  # process/container so a slow/stuck job can't block API request handling, and
+  # so workers can be scaled/restarted independently of the API.
+  # No DB env: this worker only logs (simulated email), so it needs Redis only.
+  # ========================================================================
+  cashroom-worker:
+    # Same build context as the backend (identical image) but a SEPARATE build —
+    # intentional: the worker is its own deployable. In prod you'd push one image
+    # and run it with two different commands.
+    build:
+      context: ./cashroom-backend
+    container_name: cashroom-worker
+    restart: unless-stopped
+    command: ["node", "dist/worker/main.worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
 
 # ==========================================================================
 # Named volumes.
