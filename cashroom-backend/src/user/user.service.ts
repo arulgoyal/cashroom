@@ -35,6 +35,42 @@ export class UserService {
   }
 
   /**
+   * Like findByEmail, but explicitly pulls in `passwordHash` (which is
+   * `select:false`, so the default query omits it). Used ONLY by signin, where we
+   * must compare against the hash. Keeping it a separate method means the hash is
+   * never loaded accidentally elsewhere.
+   */
+  findByEmailWithPassword(email: string): Promise<User | null> {
+    return this.users
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.email = :email', { email: email.toLowerCase() })
+      .getOne();
+  }
+
+  /** Lookup by primary key (e.g. resolving a JWT `sub` to the current user). */
+  findById(id: string): Promise<User | null> {
+    return this.users.findOne({ where: { id } });
+  }
+
+  /** Like findById, but includes the `select:false` refresh_token_hash. */
+  findByIdWithRefreshHash(id: string): Promise<User | null> {
+    return this.users
+      .createQueryBuilder('user')
+      .addSelect('user.refreshTokenHash')
+      .where('user.id = :id', { id })
+      .getOne();
+  }
+
+  /** Persist (or clear, with null) the hash of a user's current refresh token. */
+  async updateRefreshTokenHash(
+    id: string,
+    refreshTokenHash: string | null,
+  ): Promise<void> {
+    await this.users.update({ id }, { refreshTokenHash });
+  }
+
+  /**
    * Insert a new user. Email is lowercased for a stable unique key.
    *
    * The unique index `uq_users_email` is the *real* duplicate guarantee (a prior
