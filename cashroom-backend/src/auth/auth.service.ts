@@ -1,9 +1,17 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions, TokenExpiredError } from '@nestjs/jwt';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
 import { UserService } from '../user/user.service';
+import {
+  EMAIL_JOB_OPTS,
+  EMAIL_QUEUE,
+  SEND_VERIFICATION_EMAIL,
+} from '../queue/queue.constants';
+import { SendVerificationEmailJob } from '../queue/email-job.interface';
 import { User } from '../user/entities/user.entity';
 import { SignupDto } from './dto/signup.dto';
 import { SigninDto } from './dto/signin.dto';
@@ -37,20 +45,30 @@ const INVALID_CREDENTIALS = 'Invalid email or password';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
   private readonly bcryptRounds: number;
   private readonly refreshSecret: string;
   private readonly refreshExpiresIn: JwtSignOptions['expiresIn'];
+  private readonly verificationSecret: string;
+  private readonly verificationExpiresIn: JwtSignOptions['expiresIn'];
 
   constructor(
     private readonly users: UserService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    @InjectQueue(EMAIL_QUEUE)
+    private readonly emailQueue: Queue<SendVerificationEmailJob>,
   ) {
     this.bcryptRounds = Number(config.get<string>('BCRYPT_ROUNDS') ?? 12);
     this.refreshSecret =
       config.get<string>('JWT_REFRESH_SECRET') ?? 'change_me_refresh';
     this.refreshExpiresIn = (config.get<string>('JWT_REFRESH_EXPIRES_IN') ??
       '7d') as JwtSignOptions['expiresIn'];
+    this.verificationSecret =
+      config.get<string>('EMAIL_VERIFICATION_SECRET') ?? 'change_me_verify';
+    this.verificationExpiresIn = (config.get<string>(
+      'EMAIL_VERIFICATION_EXPIRES_IN',
+    ) ?? '24h') as JwtSignOptions['expiresIn'];
   }
 
   /**
@@ -76,7 +94,46 @@ export class AuthService {
     // create() also catches the unique-index violation → same 409 under a race.
     const user = await this.users.create({ email, passwordHash });
 
+    // Fire off the verification email asynchronously. Deliberately AFTER the user
+    // is committed, and non-fatal (see enqueue method) — creating the account must
+    // not depend on a working queue/email path.
+    await this.enqueueVerificationEmail(user);
+
     return this.toSafeUser(user);
+  }
+
+  /**
+   * Enqueue a `send-verification-email` job. The verification token is a
+   * short-lived JWT (sub=userId) signed with a DEDICATED secret (never the
+   * access-token secret) — the future /auth/verify endpoint will verify it.
+   *
+   * Enqueue failure is caught, not thrown: the account already exists, so a Redis
+   * hiccup must not turn a successful signup into a 500. (This is NOT atomic with
+   * the user insert — the transactional-outbox pattern is the production fix; see
+   * the learning note.)
+   */
+  private async enqueueVerificationEmail(user: User): Promise<void> {
+    try {
+      const verificationToken = await this.jwt.signAsync(
+        { sub: user.id },
+        {
+          secret: this.verificationSecret,
+          expiresIn: this.verificationExpiresIn,
+        },
+      );
+
+      await this.emailQueue.add(
+        SEND_VERIFICATION_EMAIL,
+        { userId: user.id, email: user.email, verificationToken },
+        EMAIL_JOB_OPTS,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to enqueue verification email for user ${user.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /**
