@@ -2,11 +2,15 @@
 # ──────────────────────────────────────────────────────────────────────────
 # Local development INFRASTRUCTURE for Cashroom.
 #
-# This file describes only the backing services every app talks to:
-#   - PostgreSQL  (durable, relational system-of-record)
-#   - Redis       (in-memory store for BullMQ queues + caching)
+# Services:
+#   - PostgreSQL     (durable, relational system-of-record)
+#   - Redis          (in-memory store for BullMQ queues + caching)
+#   - cashroom-backend (domain API; NestJS + TypeORM)
+#   - cashroom-bff     (edge: reverse proxy + JWT verify + throttle + logging)
 #
-# Application containers (backend, bff, frontend, workers) come in later steps.
+# Frontend + workers come in later steps. Services reach each other by SERVICE
+# NAME over the compose default network (e.g. the backend finds the DB at
+# `postgres:5432`, the BFF finds the backend at `cashroom-backend:3000`).
 #
 # NOTE: there is deliberately no top-level `version:` key. The old Compose
 # file-format version (e.g. "3.8") is OBSOLETE under the modern Compose Spec
@@ -65,6 +69,77 @@ services:
       start_period: 5s
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}  # makes the var available inside the container for healthcheck
+
+  # ========================================================================
+  # cashroom-backend — the domain API (NestJS + TypeORM).
+  # Built from ./cashroom-backend. Reaches Postgres by SERVICE NAME over the
+  # compose network, so DATABASE_HOST is `postgres` (NOT localhost, which inside
+  # the container would be the backend itself).
+  # Migrations are NOT run by this container — apply them from the host via
+  # `npm run migration:run` (the lean prod image omits ts-node/src).
+  # ========================================================================
+  cashroom-backend:
+    build:
+      context: ./cashroom-backend
+    container_name: cashroom-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy   # wait until the DB actually accepts connections
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      DATABASE_NAME: ${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS}
+    healthcheck:
+      # busybox wget (bundled in alpine); /health returns 200 when the app is up.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s   # allow time for Nest boot + DB connect
+
+  # ========================================================================
+  # cashroom-bff — Backend-for-Frontend edge (NestJS reverse proxy).
+  # Verifies access JWTs, rate-limits per IP, logs, then proxies to the backend
+  # by service name. This is the only app the browser/frontend talks to.
+  # ========================================================================
+  cashroom-bff:
+    build:
+      context: ./cashroom-bff
+    container_name: cashroom-bff
+    restart: unless-stopped
+    depends_on:
+      cashroom-backend:
+        condition: service_healthy   # don't accept traffic until the backend is ready
+    ports:
+      - "${BFF_PORT:-3001}:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      BACKEND_URL: http://cashroom-backend:3000
+      JWT_SECRET: ${JWT_SECRET}                 # MUST match the backend to verify tokens
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
+      THROTTLE_TTL: ${THROTTLE_TTL}
+      THROTTLE_LIMIT: ${THROTTLE_LIMIT}
+    healthcheck:
+      # /health is public → proxied straight to the backend's /health.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 # ==========================================================================
 # Named volumes.
