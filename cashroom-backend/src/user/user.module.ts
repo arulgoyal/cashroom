@@ -10,5 +10,8 @@ import { User } from './entities/user.entity';
   imports: [TypeOrmModule.forFeature([User])],
   controllers: [UserController],
   providers: [UserService],
+  // Export UserService so AuthModule (and others) can reuse user persistence
+  // without re-registering the repository or owning writes to the users table.
+  exports: [UserService],
 })
 export class UserModule {}

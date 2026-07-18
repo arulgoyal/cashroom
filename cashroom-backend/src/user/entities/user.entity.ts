@@ -51,4 +51,18 @@ export class User extends BaseEntity {
   /** Gates actions until the user proves ownership of the email address. */
   @Column({ name: 'is_email_verified', type: 'boolean', default: false })
   isEmailVerified: boolean;
+
+  /**
+   * Hash (sha256) of the current refresh token — NEVER the raw token, so a DB
+   * leak can't be replayed. Nullable: null = no active session. `select: false`
+   * keeps it out of default queries; signin overwrites it (single session).
+   */
+  @Column({
+    name: 'refresh_token_hash',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+    select: false,
+  })
+  refreshTokenHash: string | null;
 }
