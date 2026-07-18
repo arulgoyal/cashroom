@@ -1,9 +1,15 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { requestLogger } from './common/request-logger';
+import { requestContext } from './common/request-context.middleware';
+import { AllExceptionsFilter } from './common/all-exceptions.filter';
+import { initSentry } from './common/sentry';
 import { log } from './common/logger';
 
 async function bootstrap() {
+  // Sentry FIRST (no-op unless SENTRY_DSN set).
+  initSentry();
+
   // bodyParser:false — the BFF is a pass-through proxy and must NOT consume the
   // request body stream; http-proxy-middleware pipes it raw to the backend.
   const app = await NestFactory.create(AppModule, { bodyParser: false });
@@ -13,6 +19,13 @@ async function bootstrap() {
     origin: process.env.FRONTEND_ORIGIN ?? 'http://localhost:5173',
     credentials: true,
   });
+
+  // Consistent error responses (+ requestId) and 5xx → Sentry.
+  app.useGlobalFilters(new AllExceptionsFilter());
+
+  // Mint the requestId into ALS FIRST, so every subsequent log line (including
+  // the request-logger's) carries it, and it's available to forward to the backend.
+  app.use(requestContext());
 
   // Structured request logging, registered before the router so it observes
   // EVERY request — including ones rejected by guards (429/401).

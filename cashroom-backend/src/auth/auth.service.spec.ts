@@ -114,6 +114,25 @@ describe('AuthService', () => {
       confirmPassword: 'sup3rsecret',
     };
 
+    // Regression guard for the (removed) intermittent post-processing bug. A
+    // single-run test can't catch a flaky failure, so we assert determinism:
+    // signup must succeed on EVERY run for a valid input.
+    it('is deterministic — never fails for valid input (regression)', async () => {
+      users.findByEmail.mockResolvedValue(null);
+      users.create.mockImplementation((data: CreateUserData) =>
+        Promise.resolve(
+          makeUser({ email: data.email, passwordHash: data.passwordHash }),
+        ),
+      );
+
+      for (let i = 0; i < 25; i++) {
+        await expect(service.signup(dto)).resolves.toHaveProperty(
+          'email',
+          'student@example.com',
+        );
+      }
+    });
+
     it('happy path: hashes the password, creates the user, returns no hash', async () => {
       users.findByEmail.mockResolvedValue(null);
       users.create.mockImplementation((data: CreateUserData) =>

@@ -4,6 +4,8 @@ import type { Request } from 'express';
 import type { ServerResponse } from 'http';
 import { AccessTokenPayload } from '../auth/bff-auth.guard';
 import { log } from '../common/logger';
+import { getContext } from '../common/logging.als';
+import { captureException } from '../common/sentry';
 
 /**
  * Builds the streaming reverse proxy to the backend.
@@ -39,10 +41,18 @@ export function createBackendProxy(config: ConfigService) {
           proxyReq.setHeader('X-User-Email', String(user.email));
           proxyReq.setHeader('X-User-Role', String(user.role));
         }
+
+        // Forward the correlation id so the backend + worker share it.
+        const requestId = getContext()?.requestId;
+        if (requestId) {
+          proxyReq.setHeader('X-Request-ID', requestId);
+        }
       },
       error: (err, _req, res) => {
         // Backend unreachable / connection reset → 502 Bad Gateway.
         log('error', 'proxy_error', { error: err.message, target });
+        captureException(err); // no-op unless SENTRY_DSN set
+
         const serverRes = res as ServerResponse;
         if (!serverRes.headersSent) {
           serverRes.writeHead(502, { 'Content-Type': 'application/json' });

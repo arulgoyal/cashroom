@@ -1,14 +1,15 @@
 import { Module } from '@nestjs/common';
 import { HealthController } from './health.controller';
+import { RedisHealthService } from './redis-health.service';
 
 /**
  * HealthModule
  * ────────────
- * Groups the health-check endpoint. It has a controller but no service —
- * the logic is trivial and depends only on the DataSource, which the global
- * TypeORM setup already provides. No providers needed.
+ * The health controller now depends on a dedicated Redis client (for the readiness
+ * ping) in addition to the DataSource, so RedisHealthService is provided here.
  */
 @Module({
   controllers: [HealthController],
+  providers: [RedisHealthService],
 })
 export class HealthModule {}

@@ -12,6 +12,13 @@ export interface SendVerificationEmailJob {
   verificationToken: string;
 
   /**
+   * The requestId of the HTTP request that enqueued this job. The worker restores
+   * it into its logging context so the worker's log lines correlate back to the
+   * originating signup request — end-to-end tracing across the async boundary.
+   */
+  requestId?: string;
+
+  /**
    * Demo/testing hook ONLY: when true the processor always throws, so the job
    * exhausts its retries and lands in the DLQ — lets us exercise the
    * dead-letter path on demand. Never set by real signup.

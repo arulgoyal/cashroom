@@ -9,9 +9,24 @@ import { ExpressAdapter } from '@bull-board/express';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { EMAIL_DLQ, EMAIL_QUEUE } from './queue/queue.constants';
+import { initSentry } from './observability/sentry';
+import { WinstonLoggerService } from './observability/winston-logger.service';
+import { requestContext } from './observability/request-context.middleware';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Sentry FIRST (no-op unless SENTRY_DSN set), before anything can throw.
+  initSentry();
+
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true, // hold bootstrap logs until our logger is attached
+  });
+
+  // Route ALL Nest logs (bootstrap, HTTP, every `new Logger(...)`) through Winston.
+  app.useLogger(new WinstonLoggerService());
+
+  // Establish per-request context (requestId → ALS) FIRST, before the router, so
+  // every downstream log line carries it. Honors an inbound X-Request-ID from the BFF.
+  app.use(requestContext());
 
   // Validate every request body against its DTO before the controller runs.
   app.useGlobalPipes(

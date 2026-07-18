@@ -7,6 +7,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { getContext } from '../../observability/logging.als';
+import { captureException } from '../../observability/sentry';
 
 /**
  * AllExceptionsFilter
@@ -40,13 +42,19 @@ export class AllExceptionsFilter implements ExceptionFilter {
       ? exception.getResponse()
       : 'Internal server error';
 
-    // What gets logged (full detail, server-side only).
+    // What gets logged (full detail, server-side only). The logger adds the
+    // requestId automatically from ALS; we also surface it in the response.
+    const requestId = getContext()?.requestId;
     const where = `${request.method} ${request.url}`;
-    if (isHttp) {
-      this.logger.warn(`${status} ${where} — ${JSON.stringify(clientMessage)}`);
-    } else {
+    // Gate on the STATUS, not on HttpException-ness: a thrown 500-status
+    // HttpException is still a server incident. 5xx → error log + Sentry; 4xx →
+    // warn (normal client errors, not incidents). Sentry is a no-op without a DSN.
+    if (status >= 500) {
       const err = exception as Error;
-      this.logger.error(`500 ${where} — ${err.message}`, err.stack);
+      this.logger.error(`${status} ${where} — ${err.message}`, err.stack);
+      captureException(exception);
+    } else {
+      this.logger.warn(`${status} ${where} — ${JSON.stringify(clientMessage)}`);
     }
 
     const body =
@@ -56,6 +64,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     response.status(status).json({
       ...body,
+      requestId, // let the client/support quote this to find the exact request
       timestamp: new Date().toISOString(),
       path: request.url,
     });

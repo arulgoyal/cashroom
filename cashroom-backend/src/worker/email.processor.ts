@@ -5,9 +5,11 @@ import {
   WorkerHost,
 } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { Job, Queue } from 'bullmq';
 import { EMAIL_DLQ, EMAIL_QUEUE } from '../queue/queue.constants';
 import { SendVerificationEmailJob } from '../queue/email-job.interface';
+import { runWithContext } from '../observability/logging.als';
 
 /**
  * EmailProcessor
@@ -30,6 +32,18 @@ export class EmailProcessor extends WorkerHost {
   }
 
   async process(job: Job<SendVerificationEmailJob>): Promise<void> {
+    // Restore the enqueuing request's correlation id so this worker's log lines
+    // link back to the original signup request (end-to-end tracing).
+    return runWithContext(
+      {
+        requestId: job.data.requestId ?? randomUUID(),
+        userId: job.data.userId,
+      },
+      () => this.handle(job),
+    );
+  }
+
+  private async handle(job: Job<SendVerificationEmailJob>): Promise<void> {
     const maxAttempts = job.opts.attempts ?? 1;
     const attempt = job.attemptsMade + 1;
     this.logger.log(
@@ -66,6 +80,21 @@ export class EmailProcessor extends WorkerHost {
     err: Error,
   ): Promise<void> {
     if (!job) return;
+    // Same correlation id as the processing attempt, so the DLQ/retry logs group
+    // with the rest of the request.
+    return runWithContext(
+      {
+        requestId: job.data.requestId ?? randomUUID(),
+        userId: job.data.userId,
+      },
+      () => this.handleFailure(job, err),
+    );
+  }
+
+  private async handleFailure(
+    job: Job<SendVerificationEmailJob>,
+    err: Error,
+  ): Promise<void> {
     const maxAttempts = job.opts.attempts ?? 1;
 
     if (job.attemptsMade >= maxAttempts) {

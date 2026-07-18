@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { BullModule } from '@nestjs/bullmq';
 import { bullConnectionFactory } from './queue/bull-connection';
 import { EMAIL_DLQ } from './queue/queue.constants';
+import { UserContextInterceptor } from './observability/user-context.interceptor';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { JwtAuthModule } from './auth/jwt-auth.module';
@@ -46,6 +48,11 @@ import { LoanModule } from './loan/loan.module';
     AuthModule,
     UserModule,
     LoanModule,
+  ],
+  providers: [
+    // Runs after guards → writes the authenticated userId into the request's ALS
+    // context, so every log line after auth also carries it.
+    { provide: APP_INTERCEPTOR, useClass: UserContextInterceptor },
   ],
 })
 export class AppModule {}

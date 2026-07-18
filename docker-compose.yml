@@ -109,6 +109,8 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       EMAIL_VERIFICATION_SECRET: ${EMAIL_VERIFICATION_SECRET}
       EMAIL_VERIFICATION_EXPIRES_IN: ${EMAIL_VERIFICATION_EXPIRES_IN}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     healthcheck:
       # busybox wget (bundled in alpine); /health returns 200 when the app is up.
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
@@ -141,6 +143,8 @@ services:
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
       THROTTLE_TTL: ${THROTTLE_TTL}
       THROTTLE_LIMIT: ${THROTTLE_LIMIT}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     healthcheck:
       # /health is public → proxied straight to the backend's /health.
       test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
@@ -174,6 +178,8 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
 
 # ==========================================================================
 # Named volumes.

@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 import { isPublicPath } from './public-routes';
+import { setUserId } from '../common/logging.als';
 
 /** The access-token claims we expect (mirrors the backend's JwtPayload). */
 export interface AccessTokenPayload {
@@ -65,6 +66,8 @@ export class BffAuthGuard implements CanActivate {
       });
       // Attach for the proxy factory to read and forward as X-User-* headers.
       (req as Request & { user?: AccessTokenPayload }).user = payload;
+      // Add the authenticated userId to the request's log context.
+      setUserId(payload.sub);
       return true;
     } catch (err) {
       // Mirror the backend's distinction so clients know when to refresh.

@@ -12,6 +12,7 @@ import {
   SEND_VERIFICATION_EMAIL,
 } from '../queue/queue.constants';
 import { SendVerificationEmailJob } from '../queue/email-job.interface';
+import { getContext } from '../observability/logging.als';
 import { User } from '../user/entities/user.entity';
 import { SignupDto } from './dto/signup.dto';
 import { SigninDto } from './dto/signin.dto';
@@ -124,7 +125,14 @@ export class AuthService {
 
       await this.emailQueue.add(
         SEND_VERIFICATION_EMAIL,
-        { userId: user.id, email: user.email, verificationToken },
+        {
+          userId: user.id,
+          email: user.email,
+          verificationToken,
+          // Carry the request's correlation id into the job so the worker's logs
+          // link back to this signup request.
+          requestId: getContext()?.requestId,
+        },
         EMAIL_JOB_OPTS,
       );
     } catch (err) {
