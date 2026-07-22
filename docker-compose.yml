@@ -181,6 +181,29 @@ services:
       SENTRY_DSN: ${SENTRY_DSN:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
 
+  # ========================================================================
+  # cashroom-frontend — the developer "glass box" UI (React + Vite dev server).
+  # The BROWSER runs on your host, so it reaches the BFF at localhost:3001 —
+  # VITE_BFF_URL uses the host-mapped port even in compose (NOT the internal
+  # service name, which the browser can't resolve). Source is bind-mounted for
+  # HMR; the anonymous volume preserves the container's own node_modules.
+  # The BFF already allows this origin via FRONTEND_ORIGIN=http://localhost:5173.
+  # ========================================================================
+  cashroom-frontend:
+    build:
+      context: ./cashroom-frontend
+    container_name: cashroom-frontend
+    restart: unless-stopped
+    depends_on:
+      - cashroom-bff
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_BFF_URL: http://localhost:3001
+    volumes:
+      - ./cashroom-frontend:/app
+      - /app/node_modules
+
 # ==========================================================================
 # Named volumes.
 # Docker manages these on the host; they outlive container create/destroy.
